@@ -28,10 +28,12 @@ df <- df %>%
 
 # Count deployments in wards
 wards <- df %>%
-  group_by(`Ward (approx)`) %>%
+  group_by(`Ward Code`, `Ward (approx)`) %>%
+  mutate(`Faces seen` = as.numeric(`Faces seen`)) %>%
   summarise(
     total_deployments = n(),
     total_minutes = sum(total_minutes, na.rm = TRUE),
+    total_faces = sum(`Faces seen`, na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -42,7 +44,8 @@ census <- read_excel(here("data/Live Facial Recognition Deployments.xlsx"),
 
 # Create database with Black percentage
 wards_black <- census %>%
-  dplyr::select(`ward name`, `Black Percentage`)
+  mutate(nonwhite_percentage = 1 - (`White British` / `All usual residents`)) %>%
+  dplyr::select(`ward code`, `ward name`, `Black Percentage`, nonwhite_percentage)
 
 # Read crime data
 crime <- read.csv(here('data/MPS Ward Level Crime (most recent 24 months).csv'))
@@ -56,21 +59,26 @@ month_cols <- paste0("X", valid_ym)
 
 # Step 2: Summarise by WardName
 crime_totals <- crime %>%
-  group_by(WardName) %>%
+  group_by(WardCode, WardName) %>%
   summarise(
     total_crimes = sum(across(all_of(month_cols), as.numeric), na.rm = TRUE),
     .groups = "drop"
   )
 
 # Create data of Wards
+#wards_all <- crime_totals %>%
+#  left_join(wards, by = c("WardName" = "Ward (approx)")) %>%
+#  left_join(wards_black, by = c("WardName" = "ward name"))
+
 wards_all <- crime_totals %>%
-  left_join(wards, by = c("WardName" = "Ward (approx)")) %>%
-  left_join(wards_black, by = c("WardName" = "ward name"))
+  left_join(wards, by = c("WardCode" = "Ward Code")) %>%
+  left_join(wards_black, by = c("WardCode" = "ward code"))
 
 # Fill NAs with 0s in facial recognition deployment
 wards_all <- wards_all %>%
   mutate(total_deployments = ifelse(is.na(total_deployments), 0, total_deployments),
-         total_minutes = ifelse(is.na(total_minutes), 0, total_minutes))
+         total_minutes = ifelse(is.na(total_minutes), 0, total_minutes),
+         total_faces = ifelse(is.na(total_faces), 0 , total_faces))
 
 # Bivariate correlations
 cor.test(wards_all$`Black Percentage`, wards_all$total_deployments, method = "spearman")
@@ -78,6 +86,9 @@ cor.test(wards_all$total_crimes, wards_all$total_deployments, method = "spearman
 
 cor.test(wards_all$`Black Percentage`, wards_all$total_minutes, method = "spearman")
 cor.test(wards_all$total_crimes, wards_all$total_minutes, method = "spearman")
+
+cor.test(wards_all$`Black Percentage`, wards_all$total_faces, method = "spearman")
+cor.test(wards_all$total_crimes, wards_all$total_faces, method = "spearman")
 
 # Scatter plots
 
@@ -96,11 +107,13 @@ p1 <- make_plot(`Black Percentage`, total_deployments, "Black %", "Deployments",
 p2 <- make_plot(total_crimes, total_deployments, "Total Crimes", "Deployments", "Crimes vs Deployments")
 p3 <- make_plot(`Black Percentage`, total_minutes, "Black %", "Minutes", "Black % vs Minutes")
 p4 <- make_plot(total_crimes, total_minutes, "Total Crimes", "Minutes", "Crimes vs Minutes")
+p5 <- make_plot(`Black Percentage`, total_faces, "Black %", "Faces seen", "Black % vs Faces seen")
+p6 <- make_plot(total_crimes, total_faces, "Total Crimes", "Faces seen", "Crimes vs Faces seen")
 
 # Arrange plots in a 3x2 grid
-ggarrange(p1, p2, p3, p4,
-          ncol = 2, nrow = 2,
-          labels = LETTERS[1:4])
+ggarrange(p1, p2, p3, p4, p5, p6,
+          ncol = 2, nrow = 3,
+          labels = LETTERS[1:6])
 
 ggsave(here('scatterplots.png'))
 
@@ -108,46 +121,99 @@ ggsave(here('scatterplots.png'))
 wards_all <- wards_all %>%
   mutate(
     black_std = scale(`Black Percentage`),
+    nonwhite_std = scale(nonwhite_percentage),
     crime_std = scale(total_crimes)
   )
 
 # Log transform dependent variables
-wards_all <- wards_all %>%
-  mutate(
-    log_deployments = as.integer(log(total_deployments + 1)),
-    log_minutes = as.integer(log(total_minutes + 1))
-  )
+#wards_all <- wards_all %>%
+#  mutate(
+#    log_deployments = as.integer(log(total_deployments + 1)),
+#    log_minutes = as.integer(log(total_minutes + 1))
+#  )
+
+# Check overdispersion
+mean(wards_all$total_deployments)
+var(wards_all$total_deployments)
+
+mean(wards_all$total_minutes)
+var(wards_all$total_minutes)
+
+mean(wards_all$total_faces)
+var(wards_all$total_faces)
 
 # Hurdle models
 hurdle_deployments <- hurdle(
-  log_deployments ~ black_std + crime_std,
+  total_deployments ~ black_std + crime_std,
   data = wards_all,
-  dist = "poisson"
+  dist = "negbin"
 )
 
 hurdle_minutes <- hurdle(
   total_minutes ~ black_std + crime_std,
   data = wards_all,
-  dist = "poisson"
+  dist = "negbin"
+)
+
+hurdle_faces <- hurdle(
+  total_faces ~ black_std + crime_std,
+  data = wards_all,
+  dist = "negbin"
 )
 
 # Summaries
 
 summary(hurdle_deployments)
-#Racial composition has a statistically significant effect on whether a ward gets any facial recognition deployment, even after adjusting for crime.
-#Crime drives the number of deployments among targeted wards, not race.
-
 summary(hurdle_minutes)
-#Both
+summary(hurdle_faces)
 
-tab_model(hurdle_deployments, hurdle_minutes,
+tab_model(hurdle_deployments, hurdle_minutes, hurdle_faces,
           show.ci = FALSE,
           show.p = TRUE,
-          dv.labels = c("Deployments", "Minutes"),
+          dv.labels = c("Deployments", "Minutes", "Faces"),
           title = "Hurdle Model Results: Live Facial Recognition Use",
           file = here("LFR_Hurdle_Models.doc"))
 
 #Summary:
-# I wanted to find out whether live facial recognition (LFR) is being used more in areas with higher proportions of Black residents, even after accounting for how much crime happens in those areas. In other words, does ethnic makeup help explain where and how this technology is deployed, beyond just crime rates?
-# The results suggest that it does—at least to some extent. Areas with more Black residents were more likely to have LFR used at all, even when crime levels were taken into account. Once LFR was deployed, the amount of crime was the strongest factor explaining how often and for how long it was used. But we also found that in areas with more Black residents, LFR tended to be used for slightly longer periods—even after adjusting for crime. On the other hand, the number of times it was deployed didn’t seem to depend on ethnic makeup once crime was considered.
-# So overall, while crime is clearly a key driver of LFR use, the ethnic composition of an area also seems to matter—particularly in the decision about whether to use it there in the first place, and possibly in how long it’s used for.
+# We analysed whether the use of live facial recognition (LFR) across London wards could be explained by the proportion of Black residents in each area, after accounting for local crime levels. 
+# We looked at three different outcomes: whether LFR was used in an area at all (binary use), and if so, how intensively it was used—measured by the number of deployments, the total minutes of deployment, and the number of faces detected.
+# The results suggest that the racial composition of a ward is associated with the likelihood that LFR is used at all. Specifically, wards with higher proportions of Black residents were significantly more likely to receive any LFR deployment, even when crime levels were taken into account. 
+# A one standard deviation increase in Black population associated with a 31% increase in the odds of any LFR use.
+# However, once a ward had received at least one deployment, the intensity of LFR use—how many times it was deployed, how long it ran, or how many faces it detected—was not significantly related to the ethnic composition of the ward. 
+# In contrast, local crime levels played a significant role in both parts of the model. 
+# Areas with more reported crime were not only more likely to receive LFR deployments in the first place, but also experienced more frequent and longer-lasting use of the technology, and a higher number of faces detected.
+# In short, while crime appears to drive both the decision to use LFR and how heavily it is applied, the racial composition of an area seems to matter primarily in the decision of whether to deploy the technology at all.
+
+# Analysis for non whites as sensitivity
+
+# Hurdle models
+hurdle_deployments_nw <- hurdle(
+  total_deployments ~ nonwhite_std + crime_std,
+  data = wards_all,
+  dist = "negbin"
+)
+
+hurdle_minutes_nw <- hurdle(
+  total_minutes ~ nonwhite_std + crime_std,
+  data = wards_all,
+  dist = "negbin"
+)
+
+hurdle_faces_nw <- hurdle(
+  total_faces ~ nonwhite_std + crime_std,
+  data = wards_all,
+  dist = "negbin"
+)
+
+# Summaries
+
+summary(hurdle_deployments_nw)
+summary(hurdle_minutes_nw)
+summary(hurdle_faces_nw)
+
+tab_model(hurdle_deployments_nw, hurdle_minutes_nw, hurdle_faces_nw,
+          show.ci = FALSE,
+          show.p = TRUE,
+          dv.labels = c("Deployments", "Minutes", "Faces"),
+          title = "Hurdle Model Results: Live Facial Recognition Use",
+          file = here("LFR_Hurdle_Models_nw.doc"))
