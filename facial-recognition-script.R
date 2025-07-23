@@ -10,6 +10,9 @@ library(sjPlot)
 library(ggpubr)
 library(dplyr)
 
+# Functions created.
+`%nin%` <- Negate(`%in%`)
+
 # Read deployments sheet, skipping the first 3 lines
 df <- read_excel(here("data/Live Facial Recognition Deployments.xlsx"),
                  sheet = "Deployment Data",
@@ -25,6 +28,10 @@ df <- df %>%
     duration_format = ymd_hms(Duration),
     total_minutes = hour(duration_format) * 60 + minute(duration_format)
   )
+
+# Look at dates.
+
+
 
 # Count deployments in wards
 wards <- df %>%
@@ -74,11 +81,50 @@ wards_all <- crime_totals %>%
   left_join(wards, by = c("WardCode" = "Ward Code")) %>%
   left_join(wards_black, by = c("WardCode" = "ward code"))
 
+# How many missings are about to filled in?
+wards_all %>% 
+  select(total_deployments, total_minutes, total_faces) %>% 
+  lapply(., function(x)sum(is.na(x))) # 608 out of 680.
+
 # Fill NAs with 0s in facial recognition deployment
 wards_all <- wards_all %>%
   mutate(total_deployments = ifelse(is.na(total_deployments), 0, total_deployments),
          total_minutes = ifelse(is.na(total_minutes), 0, total_minutes),
          total_faces = ifelse(is.na(total_faces), 0 , total_faces))
+
+# Spatial explore.
+library(sf)
+
+# Load.
+wards_sf <- st_read("data/London-wards-2018/London-wards-2018_ESRI/London_Ward.shp")
+
+# Comment: N 657 wards in 2018, but the wards_all data has 680. Which boundaries used?
+
+# Raw boundaries from loaded in above.
+ggplot(data = wards_sf) +
+  geom_sf()
+
+# What's the overlap with these ward codes and those used earlier?
+matched_wards <- wards_all %>% 
+  filter(wards_all$WardCode %in% wards_sf$GSS_CODE)
+
+# Which ones don't match?
+non_matched_wards <- wards_all %>% 
+  filter(wards_all$WardCode %nin% wards_sf$GSS_CODE) # note negation
+
+# N. What explains the non-matches? Have I done something weird/wrong?
+nrow(matched_wards) # 149
+nrow(non_matched_wards) # 531
+
+# Join. This is based on assumed match with 2018 codes.
+wards_joined_sf <- wards_sf %>% 
+  left_join(wards_all, by = c("GSS_CODE" = "WardCode"), keep = TRUE)
+
+# Plot to demonstrate. This doesn't tell us much about the analysis because
+# the missings could be due to non-matches with the spatial data.
+ggplot(data = wards_joined_sf) +
+  geom_sf(mapping = aes(fill = total_minutes), colour = "transparent") +
+  scale_fill_viridis_c()
 
 # Bivariate correlations
 cor.test(wards_all$`Black Percentage`, wards_all$total_deployments, method = "spearman")
